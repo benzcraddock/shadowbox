@@ -14,6 +14,27 @@ Add the intelligence layer to classify punches, detect defensive movements, and 
 
 ## Task Breakdown
 
+### 0. Stance Selection UI (MUST DO FIRST)
+
+**Files**: `components/StanceSelector.tsx`, update user profile
+
+**Why**: Punch classification depends on knowing if the user is orthodox or southpaw.
+
+**Implementation**:
+- Modal/dialog that appears on first training session
+- Two options: Orthodox (right-handed) or Southpaw (left-handed)
+- Include helpful graphics/descriptions:
+  - Orthodox: "Left hand forward (jab), right hand back (cross)"
+  - Southpaw: "Right hand forward (jab), left hand back (cross)"
+- Save to user profile in database
+- Allow changing in settings later
+- Auto-detect option (future enhancement): analyze which hand extends more often
+
+**Why This Matters**:
+- Determines which hand is lead (jab) vs rear (cross)
+- Critical for accurate punch type classification
+- Affects all punch numbering (1=jab is lead hand, 2=cross is rear hand)
+
 ### 1. Configuration System for Form Benchmarks
 
 **File**: `lib/config/formBenchmarks.ts`
