@@ -169,6 +169,39 @@ ShadowBox uses a **dark-mode-first** design with carefully chosen color tokens:
 
 👉 **See [FUTURE_PHASES.md](./FUTURE_PHASES.md) for detailed roadmap**
 
+## Privacy & Security 🔒
+
+**Your privacy is a top priority.** ShadowBox uses client-side pose detection - your camera data never leaves your device.
+
+### 🛡️ How It Works:
+
+- **100% Local Processing**: All pose detection runs in your browser using MediaPipe (Google's open-source ML library)
+- **No Video Upload**: Camera feed is processed locally - never sent to any server
+- **No Storage**: Video frames are analyzed in real-time and immediately discarded
+- **Open Source**: MediaPipe is fully open source and auditable ([github.com/google/mediapipe](https://github.com/google/mediapipe))
+
+### 📊 What Gets Stored:
+
+**Stored in Database (with your consent):**
+- ✅ Session metadata (date, duration)
+- ✅ Punch counts and form scores (just numbers)
+- ✅ Your account info (email, preferences)
+
+**Never Stored:**
+- ❌ Video or camera feed
+- ❌ Screenshots or images
+- ❌ Any visual data from your camera
+
+### 🔐 Technical Details:
+
+- **MediaPipe Pose** runs entirely client-side using WebAssembly
+- The ML model (~4MB) downloads once and runs locally
+- Only 33 body landmark coordinates (x, y, z positions) are extracted
+- **You could disconnect your internet** after loading the page and it would still work
+- All data in Supabase uses Row Level Security (RLS) - users can only access their own data
+
+**Learn more**: [MediaPipe Documentation](https://developers.google.com/mediapipe/solutions/vision/pose_landmarker)
+
 ## Contributing
 
 This is a personal project by Ben Craddock. Contributions are welcome!
