@@ -31,7 +31,7 @@ export function usePoseDetection({ videoRef, canvasRef, enabled }: UsePoseDetect
   const poseLandmarkerRef = useRef<PoseLandmarker | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const lastFrameTimeRef = useRef<number>(0);
-  const fpsCounterRef = useRef({ frames: 0, lastTime: Date.now() });
+  const fpsCounterRef = useRef({ frames: 0, lastTime: performance.now() });
 
   // Initialize MediaPipe Pose Landmarker
   useEffect(() => {
@@ -86,6 +86,13 @@ export function usePoseDetection({ videoRef, canvasRef, enabled }: UsePoseDetect
 
       if (!canvas || !video) return;
 
+      // Ensure canvas size matches video size before drawing
+      if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        console.log('Canvas resized to:', canvas.width, 'x', canvas.height);
+      }
+
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
@@ -123,40 +130,62 @@ export function usePoseDetection({ videoRef, canvasRef, enabled }: UsePoseDetect
     if (!video || !poseLandmarker || !enabled || !ready) return;
 
     if (video.readyState >= 2) {
-      const now = Date.now();
-      const results = poseLandmarker.detectForVideo(video, now);
+      try {
+        // Use performance.now() for high-precision monotonic timestamps
+        const now = performance.now();
 
-      if (results.landmarks && results.landmarks.length > 0) {
-        const poseResult: PoseDetectionResult = {
-          landmarks: results.landmarks[0].map((lm) => ({
-            x: lm.x,
-            y: lm.y,
-            z: lm.z,
-            visibility: lm.visibility,
-          })),
-          worldLandmarks: results.worldLandmarks[0].map((lm) => ({
-            x: lm.x,
-            y: lm.y,
-            z: lm.z,
-            visibility: lm.visibility,
-          })),
-          timestamp: now,
-        };
+        // Limit to ~30fps (33ms between frames) to avoid overwhelming MediaPipe
+        const timeSinceLastFrame = now - lastFrameTimeRef.current;
+        if (timeSinceLastFrame < 33) {
+          // Skip this frame, try again next animation frame
+          animationFrameRef.current = requestAnimationFrame(detectPose);
+          return;
+        }
 
-        setLatestPose(poseResult);
-        renderSkeleton(results.landmarks[0]);
+        const results = poseLandmarker.detectForVideo(video, now);
+
+        if (results.landmarks && results.landmarks.length > 0) {
+          const poseResult: PoseDetectionResult = {
+            landmarks: results.landmarks[0].map((lm) => ({
+              x: lm.x,
+              y: lm.y,
+              z: lm.z,
+              visibility: lm.visibility,
+            })),
+            worldLandmarks: results.worldLandmarks[0].map((lm) => ({
+              x: lm.x,
+              y: lm.y,
+              z: lm.z,
+              visibility: lm.visibility,
+            })),
+            timestamp: now,
+          };
+
+          setLatestPose(poseResult);
+          renderSkeleton(results.landmarks[0]);
+        } else {
+          // Clear skeleton if no pose detected
+          const canvas = canvasRef.current;
+          const ctx = canvas?.getContext('2d');
+          if (ctx && canvas) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+          }
+        }
+
+        // Calculate FPS
+        const counter = fpsCounterRef.current;
+        counter.frames++;
+        if (now - counter.lastTime >= 1000) {
+          setFps(counter.frames);
+          counter.frames = 0;
+          counter.lastTime = now;
+        }
+
+        lastFrameTimeRef.current = now;
+      } catch (err) {
+        // Log error but continue the loop
+        console.warn('Pose detection frame error:', err);
       }
-
-      // Calculate FPS
-      const counter = fpsCounterRef.current;
-      counter.frames++;
-      if (now - counter.lastTime >= 1000) {
-        setFps(counter.frames);
-        counter.frames = 0;
-        counter.lastTime = now;
-      }
-
-      lastFrameTimeRef.current = now;
     }
 
     animationFrameRef.current = requestAnimationFrame(detectPose);
