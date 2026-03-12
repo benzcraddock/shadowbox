@@ -160,6 +160,15 @@ ShadowBox uses a **dark-mode-first** design with carefully chosen color tokens:
 - Motion system (fades, transitions)
 - Performance audit (maintain 30fps)
 
+### ✨ Phase 5+: Future Features
+- 🎭 **Avatar System**: 3D hologram that mirrors your movements
+- 🎙️ **Voice Coaching**: AI coach with selectable voices (male/female)
+- 🏆 Social features, leaderboards, and challenges
+- 📱 Mobile app and offline support
+- 💰 Premium features and monetization
+
+👉 **See [FUTURE_PHASES.md](./FUTURE_PHASES.md) for detailed roadmap**
+
 ## Contributing
 
 This is a personal project by Ben Craddock. Contributions are welcome!
