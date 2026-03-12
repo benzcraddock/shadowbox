@@ -27,9 +27,6 @@ export function useCamera() {
 
         if (mounted) {
           setStream(mediaStream);
-          if (videoRef.current) {
-            videoRef.current.srcObject = mediaStream;
-          }
           setLoading(false);
         }
       } catch (err) {
@@ -53,6 +50,14 @@ export function useCamera() {
       }
     };
   }, []);
+
+  // Attach stream to video element when both are ready
+  useEffect(() => {
+    if (stream && videoRef.current) {
+      videoRef.current.srcObject = stream;
+      console.log('Camera stream attached to video element');
+    }
+  }, [stream, videoRef]);
 
   return { stream, error, loading, videoRef };
 }
