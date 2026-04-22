@@ -1,32 +1,123 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useCamera } from '@/lib/hooks/useCamera';
 import { usePoseDetection } from '@/lib/hooks/usePoseDetection';
 import { createClient } from '@/lib/supabase/client';
 import { useRouter } from 'next/navigation';
 import StanceSelector from '@/components/StanceSelector';
-import type { Stance } from '@/lib/types/database';
+import DefenseArrow from '@/components/DefenseArrow';
+import type { MovementType, PunchType, Stance } from '@/lib/types/database';
+import { PunchClassifier } from '@/lib/detection/punchClassifier';
+import { DefenseClassifier } from '@/lib/detection/defenseClassifier';
+import { StanceDetector } from '@/lib/detection/stanceDetector';
+import { FormAnalyzer } from '@/lib/feedback/formAnalyzer';
+import type { FormQuality } from '@/lib/types/detection';
+import {
+  checkFraming,
+  elbowAngle,
+  shoulderWidth,
+  type FramingStatus,
+} from '@/lib/utils/landmarkAnalysis';
+
+const PUNCH_LABELS: Record<PunchType, string> = {
+  1: 'Jab',
+  2: 'Cross',
+  3: 'Lead Hook',
+  4: 'Rear Hook',
+  5: 'Lead Uppercut',
+  6: 'Rear Uppercut',
+};
+
+const DEFENSE_LABELS: Record<MovementType, string> = {
+  slip_left: 'Slip Left',
+  slip_right: 'Slip Right',
+  duck: 'Duck',
+  pull_back: 'Pull Back',
+};
+
+const CUE_TTL_MS = 1800;
+
+const emptyPunchCounts = (): Record<PunchType, number> => ({
+  1: 0,
+  2: 0,
+  3: 0,
+  4: 0,
+  5: 0,
+  6: 0,
+});
+
+const emptyDefenseCounts = (): Record<MovementType, number> => ({
+  slip_left: 0,
+  slip_right: 0,
+  duck: 0,
+  pull_back: 0,
+});
 
 export default function TrainPage() {
   const router = useRouter();
   const supabase = createClient();
+  const [debug] = useState(
+    () =>
+      typeof window !== 'undefined' &&
+      new URLSearchParams(window.location.search).get('debug') === '1'
+  );
   const [user, setUser] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [stance, setStance] = useState<Stance | null>(null);
   const [stanceLoaded, setStanceLoaded] = useState(false);
   const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null);
   const [elapsedTime, setElapsedTime] = useState(0);
-  const [punchCount, setPunchCount] = useState(0);
   const [statsVisible, setStatsVisible] = useState(true);
+
+  const [punchCounts, setPunchCounts] = useState<Record<PunchType, number>>(emptyPunchCounts);
+  const [defenseCounts, setDefenseCounts] = useState<Record<MovementType, number>>(emptyDefenseCounts);
+  const [formTotal, setFormTotal] = useState(0);
+  const [formSampleCount, setFormSampleCount] = useState(0);
+  const [cue, setCue] = useState<{ text: string; quality: FormQuality } | null>(null);
+  const [defenseFlash, setDefenseFlash] = useState<{
+    key: number;
+    type: MovementType;
+    quality: FormQuality;
+  } | null>(null);
+  const defenseFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [framing, setFraming] = useState<FramingStatus>('waiting');
+  const framingStreakRef = useRef<{ status: FramingStatus; count: number }>({
+    status: 'waiting',
+    count: 0,
+  });
 
   const canvasRef = useRef<HTMLCanvasElement>(null!);
   const { stream, error: cameraError, loading: cameraLoading, videoRef } = useCamera();
+
+  const skeletonColor =
+    cue?.quality === 'good'
+      ? '#4ADE80'
+      : cue?.quality === 'acceptable'
+        ? '#FACC15'
+        : cue?.quality === 'needs_correction'
+          ? '#EF4444'
+          : '#4ADE80';
+
   const { ready, error: poseError, fps, latestPose } = usePoseDetection({
     videoRef,
     canvasRef,
     enabled: !!stream && !cameraLoading,
+    skeletonColor,
   });
+
+  const punchClassifierRef = useRef<PunchClassifier | null>(null);
+  const defenseClassifierRef = useRef<DefenseClassifier | null>(null);
+  const formAnalyzerRef = useRef<FormAnalyzer | null>(null);
+  const stanceDetectorRef = useRef<StanceDetector>(new StanceDetector());
+  const [suggestedStance, setSuggestedStance] = useState<Stance | null>(null);
+  const cueTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const totalPunches = useMemo(
+    () => Object.values(punchCounts).reduce((a, b) => a + b, 0),
+    [punchCounts]
+  );
+  const avgFormScore = formSampleCount > 0 ? Math.round(formTotal / formSampleCount) : null;
 
   // Check auth status
   useEffect(() => {
@@ -76,6 +167,133 @@ export default function TrainPage() {
     setStance(next);
   };
 
+  // Instantiate (or re-stance) classifiers whenever the chosen stance changes.
+  useEffect(() => {
+    if (!stance) return;
+    if (!punchClassifierRef.current) {
+      punchClassifierRef.current = new PunchClassifier(stance);
+    } else {
+      punchClassifierRef.current.setStance(stance);
+    }
+    if (!defenseClassifierRef.current) {
+      defenseClassifierRef.current = new DefenseClassifier();
+    }
+    if (!formAnalyzerRef.current) {
+      formAnalyzerRef.current = new FormAnalyzer(stance);
+    } else {
+      formAnalyzerRef.current.setStance(stance);
+    }
+  }, [stance]);
+
+  // Run classifiers on each new pose frame.
+  useEffect(() => {
+    if (!latestPose) return;
+    const { landmarks, timestamp } = latestPose;
+
+    // While the stance selector is open, sample poses to auto-suggest a stance.
+    if (stanceLoaded && !stance) {
+      stanceDetectorRef.current.ingest(landmarks);
+      const guess = stanceDetectorRef.current.detect();
+      if (guess && guess !== suggestedStance) setSuggestedStance(guess);
+      return;
+    }
+
+    if (!stance) return;
+
+    const punchCls = punchClassifierRef.current;
+    const defenseCls = defenseClassifierRef.current;
+    const form = formAnalyzerRef.current;
+    if (!punchCls || !defenseCls || !form) return;
+
+    const rawFraming = checkFraming(landmarks);
+    // Hysteresis: "ok" takes effect immediately, but a bad status must
+    // persist ~5 frames before flipping the banner on. Prevents flicker
+    // during transient visibility dips (e.g. pulling back or bobbing).
+    const streak = framingStreakRef.current;
+    if (rawFraming === streak.status) {
+      streak.count += 1;
+    } else {
+      streak.status = rawFraming;
+      streak.count = 1;
+    }
+    const effectiveFraming: FramingStatus =
+      rawFraming === 'ok' || streak.count >= 5 ? rawFraming : framing;
+    if (effectiveFraming !== framing) setFraming(effectiveFraming);
+
+    // Don't classify while the user is mis-framed — walking around,
+    // too close/far, or partially out of view produces false positives.
+    if (effectiveFraming !== 'ok') {
+      punchCls.reset();
+      return;
+    }
+
+    const punchEvent = punchCls.ingest(landmarks, timestamp);
+    if (punchEvent) {
+      const analysis = form.analyzePunch(punchEvent, landmarks);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('[punch]', {
+          type: punchEvent.type,
+          side: punchEvent.side,
+          peakAngle: Math.round(punchEvent.peakElbowAngle),
+          peakVel: punchEvent.peakWristVelocity.toFixed(2),
+          score: analysis.score,
+        });
+      }
+      setPunchCounts((prev) => ({
+        ...prev,
+        [punchEvent.type]: prev[punchEvent.type] + 1,
+      }));
+      setFormTotal((t) => t + analysis.score);
+      setFormSampleCount((n) => n + 1);
+      flashCue(
+        `${PUNCH_LABELS[punchEvent.type]} · ${analysis.score}${analysis.issues[0] ? ` — ${analysis.issues[0]}` : ''}`,
+        analysis.quality
+      );
+    }
+
+    const defenseEvent = defenseCls.ingest(landmarks, timestamp);
+    if (defenseEvent) {
+      const analysis = form.analyzeDefense(defenseEvent, landmarks);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('[defense]', {
+          type: defenseEvent.type,
+          confidence: defenseEvent.confidence.toFixed(2),
+          score: analysis.score,
+        });
+      }
+      setDefenseCounts((prev) => ({
+        ...prev,
+        [defenseEvent.type]: prev[defenseEvent.type] + 1,
+      }));
+      setFormTotal((t) => t + analysis.score);
+      setFormSampleCount((n) => n + 1);
+      flashCue(
+        `${DEFENSE_LABELS[defenseEvent.type]} · ${analysis.score}${analysis.issues[0] ? ` — ${analysis.issues[0]}` : ''}`,
+        analysis.quality
+      );
+      setDefenseFlash({
+        key: Date.now(),
+        type: defenseEvent.type,
+        quality: analysis.quality,
+      });
+      if (defenseFlashTimerRef.current) clearTimeout(defenseFlashTimerRef.current);
+      defenseFlashTimerRef.current = setTimeout(() => setDefenseFlash(null), 1200);
+    }
+  }, [latestPose, stance]);
+
+  const flashCue = (text: string, quality: FormQuality) => {
+    setCue({ text, quality });
+    if (cueTimerRef.current) clearTimeout(cueTimerRef.current);
+    cueTimerRef.current = setTimeout(() => setCue(null), CUE_TTL_MS);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (cueTimerRef.current) clearTimeout(cueTimerRef.current);
+      if (defenseFlashTimerRef.current) clearTimeout(defenseFlashTimerRef.current);
+    };
+  }, []);
+
   // Start session timer once stance is chosen and pose detection is live
   useEffect(() => {
     if (!sessionStartTime && ready && stream && stance) {
@@ -95,14 +313,12 @@ export default function TrainPage() {
     return () => clearInterval(interval);
   }, [sessionStartTime]);
 
-  // Format time as MM:SS
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Handle logout
   const handleLogout = async () => {
     await supabase.auth.signOut();
     router.push('/login');
@@ -132,9 +348,45 @@ export default function TrainPage() {
     );
   }
 
+  const cueColorClass =
+    cue?.quality === 'good'
+      ? 'border-accent-positive text-accent-positive'
+      : cue?.quality === 'acceptable'
+        ? 'border-accent-neutral text-accent-neutral'
+        : cue?.quality === 'needs_correction'
+          ? 'border-accent-negative text-accent-negative'
+          : 'border-border-subtle text-text-secondary';
+
+  const debugMetrics = debug && latestPose
+    ? {
+        shoulderWidth: shoulderWidth(latestPose.landmarks).toFixed(3),
+        leftElbow: Math.round(elbowAngle('left', latestPose.landmarks)),
+        rightElbow: Math.round(elbowAngle('right', latestPose.landmarks)),
+      }
+    : null;
+
+  const framingMessage: Record<FramingStatus, string | null> = {
+    ok: null,
+    waiting: null,
+    too_close: 'Step back — you\'re too close to the camera',
+    too_far: 'Move closer — we can\'t see your shoulders clearly',
+    out_of_frame: 'Frame your whole upper body in view',
+  };
+  const framingBanner = ready && stance ? framingMessage[framing] : null;
+
   return (
     <div className="flex flex-col h-screen bg-bg-primary">
-      {stanceLoaded && !stance && <StanceSelector onSelect={saveStance} />}
+      {stanceLoaded && !stance && (
+        <StanceSelector
+          onSelect={saveStance}
+          initialStance={suggestedStance}
+          subtitle={
+            suggestedStance
+              ? `We detected you're probably ${suggestedStance}. Confirm or pick the other.`
+              : undefined
+          }
+        />
+      )}
       {/* Top Bar */}
       <div className="flex items-center justify-between px-6 py-4 bg-bg-surface border-b border-border-subtle">
         <div className="flex items-center gap-8">
@@ -149,7 +401,7 @@ export default function TrainPage() {
             <div className="flex items-center gap-2">
               <span className="text-text-secondary">Total Punches:</span>
               <span className="text-text-primary font-semibold text-lg">
-                {punchCount}
+                {totalPunches}
               </span>
             </div>
           </div>
@@ -206,6 +458,23 @@ export default function TrainPage() {
             </div>
           )}
 
+          {framingBanner && (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 px-5 py-3 bg-bg-elevated/90 backdrop-blur-sm border border-accent-neutral rounded-[8px] z-10">
+              <p className="text-sm font-medium text-accent-neutral">
+                {framingBanner}
+              </p>
+            </div>
+          )}
+
+          {debugMetrics && (
+            <div className="absolute top-4 right-4 px-4 py-3 bg-bg-elevated/90 backdrop-blur-sm border border-border-subtle rounded-[8px] z-10 font-mono text-xs text-text-secondary space-y-1 pointer-events-none">
+              <div>framing: <span className="text-text-primary">{framing}</span></div>
+              <div>shoulder w: <span className="text-text-primary">{debugMetrics.shoulderWidth}</span></div>
+              <div>L elbow: <span className="text-text-primary">{debugMetrics.leftElbow}°</span></div>
+              <div>R elbow: <span className="text-text-primary">{debugMetrics.rightElbow}°</span></div>
+            </div>
+          )}
+
           {/* Video Element (hidden, used for pose detection) */}
           <video
             ref={videoRef}
@@ -223,10 +492,20 @@ export default function TrainPage() {
             style={{ transform: 'scaleX(-1)' }}
           />
 
+          {defenseFlash && (
+            <DefenseArrow
+              key={defenseFlash.key}
+              type={defenseFlash.type}
+              quality={defenseFlash.quality}
+            />
+          )}
+
           {/* Feedback Overlay (bottom center) */}
-          <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 px-6 py-3 bg-bg-elevated/90 backdrop-blur-sm border border-border-subtle rounded-[8px]">
-            <p className="text-text-secondary text-sm">
-              {!ready ? 'Initializing pose detection...' : 'Ready to train'}
+          <div
+            className={`absolute bottom-8 left-1/2 transform -translate-x-1/2 px-6 py-3 bg-bg-elevated/90 backdrop-blur-sm border rounded-[8px] transition-colors ${cueColorClass}`}
+          >
+            <p className="text-sm font-medium">
+              {cue?.text ?? (!ready ? 'Initializing pose detection...' : 'Ready to train')}
             </p>
           </div>
         </div>
@@ -263,26 +542,39 @@ export default function TrainPage() {
                   Punch Breakdown
                 </h3>
                 <div className="space-y-3">
-                  {[
-                    { name: 'Jab', number: 1, count: 0 },
-                    { name: 'Cross', number: 2, count: 0 },
-                    { name: 'Lead Hook', number: 3, count: 0 },
-                    { name: 'Rear Hook', number: 4, count: 0 },
-                    { name: 'Lead Uppercut', number: 5, count: 0 },
-                    { name: 'Rear Uppercut', number: 6, count: 0 },
-                  ].map((punch) => (
+                  {([1, 2, 3, 4, 5, 6] as PunchType[]).map((number) => (
                     <div
-                      key={punch.number}
+                      key={number}
                       className="flex items-center justify-between p-3 bg-bg-primary rounded-[8px]"
                     >
                       <div className="flex items-center gap-3">
                         <span className="w-8 h-8 flex items-center justify-center bg-bg-elevated rounded-full text-text-primary font-semibold text-sm">
-                          {punch.number}
+                          {number}
                         </span>
-                        <span className="text-text-primary">{punch.name}</span>
+                        <span className="text-text-primary">{PUNCH_LABELS[number]}</span>
                       </div>
                       <span className="text-text-primary font-semibold">
-                        {punch.count}
+                        {punchCounts[number]}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Defense Breakdown */}
+              <div className="mt-8 space-y-4">
+                <h3 className="text-sm font-medium text-text-secondary uppercase tracking-wide">
+                  Defensive Movements
+                </h3>
+                <div className="space-y-3">
+                  {(Object.keys(DEFENSE_LABELS) as MovementType[]).map((type) => (
+                    <div
+                      key={type}
+                      className="flex items-center justify-between p-3 bg-bg-primary rounded-[8px]"
+                    >
+                      <span className="text-text-primary">{DEFENSE_LABELS[type]}</span>
+                      <span className="text-text-primary font-semibold">
+                        {defenseCounts[type]}
                       </span>
                     </div>
                   ))}
@@ -296,7 +588,7 @@ export default function TrainPage() {
                 </h3>
                 <div className="p-6 bg-bg-primary rounded-[8px] text-center">
                   <div className="text-5xl font-semibold text-text-primary mb-2">
-                    --
+                    {avgFormScore ?? '--'}
                   </div>
                   <div className="text-text-secondary text-sm">
                     Out of 100

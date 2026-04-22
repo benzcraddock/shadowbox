@@ -84,15 +84,15 @@ export const DEFENSE_THRESHOLDS: Record<MovementType, DefenseThreshold> = {
   },
   duck: {
     minHeadDisplacement: 0,
-    maxHeadDisplacement: 0.15,
-    minHeadDrop: 0.2,
-    maxHeadDrop: 0.45,
+    maxHeadDisplacement: 0.3,
+    minHeadDrop: 0.25,
+    maxHeadDrop: 1.5,
     minDurationMs: 100,
   },
   pull_back: {
     minHeadDisplacement: 0,
-    maxHeadDisplacement: 0.2,
-    minHeadZShift: 0.08,
+    maxHeadDisplacement: 0.3,
+    minHeadZShift: 0.05,
     minDurationMs: 100,
   },
 };

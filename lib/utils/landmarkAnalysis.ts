@@ -165,3 +165,41 @@ export function visible(
 ): boolean {
   return indices.every((i) => (landmarks[i]?.visibility ?? 0) >= min);
 }
+
+export type FramingStatus =
+  | 'ok'
+  | 'too_close'
+  | 'too_far'
+  | 'out_of_frame'
+  | 'waiting';
+
+// The sweet spot for shoulder width in normalized image coords.
+// Below → user is too far (shoulders look narrow). Above → too close.
+const FRAME_SHOULDER_MIN = 0.13;
+const FRAME_SHOULDER_MAX = 0.42;
+
+// Upper body points we need visible to trust classification.
+// Hips are excluded — framing tight to chest is fine, and tight framing is
+// common when the user wants space to throw punches.
+const FRAME_REQUIRED_POINTS = [
+  LM.NOSE,
+  LM.LEFT_SHOULDER,
+  LM.RIGHT_SHOULDER,
+  LM.LEFT_ELBOW,
+  LM.RIGHT_ELBOW,
+  LM.LEFT_WRIST,
+  LM.RIGHT_WRIST,
+];
+
+export function checkFraming(
+  landmarks: PoseLandmarks[] | null | undefined
+): FramingStatus {
+  if (!landmarks || landmarks.length === 0) return 'waiting';
+  if (!visible(landmarks, FRAME_REQUIRED_POINTS, 0.3)) return 'out_of_frame';
+
+  const width = shoulderWidth(landmarks);
+  if (width < FRAME_SHOULDER_MIN) return 'too_far';
+  if (width > FRAME_SHOULDER_MAX) return 'too_close';
+
+  return 'ok';
+}

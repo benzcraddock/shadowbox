@@ -4,16 +4,37 @@ import type { PunchType, Stance } from '@/lib/types/database';
 import type { PunchEvent } from '@/lib/types/detection';
 import {
   LM,
-  calculateVelocity,
   elbowAngle,
   leadSide,
   rearSide,
+  shoulderMidpoint,
   shoulderWidth,
   visible,
   wrist,
   type Point3D,
   type Side,
 } from '@/lib/utils/landmarkAnalysis';
+
+// Wrist position minus shoulder midpoint — the wrist's offset from the body.
+// When the whole body translates (e.g. user walks toward the camera), this
+// stays stable, so locomotion doesn't look like punching.
+function relativeWrist(side: Side, landmarks: PoseLandmarks[]): Point3D {
+  const w = wrist(side, landmarks);
+  const mid = shoulderMidpoint(landmarks);
+  return { x: w.x - mid.x, y: w.y - mid.y, z: w.z - mid.z };
+}
+
+function relativeVelocity(
+  current: Point3D,
+  previous: Point3D,
+  deltaMs: number
+): number {
+  if (deltaMs <= 0) return 0;
+  const dx = current.x - previous.x;
+  const dy = current.y - previous.y;
+  const dz = current.z - previous.z;
+  return Math.hypot(dx, dy, dz) / (deltaMs / 1000);
+}
 
 interface Frame {
   landmarks: PoseLandmarks[];
@@ -22,6 +43,7 @@ interface Frame {
 
 interface ArmState {
   phase: 'idle' | 'extending' | 'retracting';
+  entryElbowAngle: number;
   peakElbowAngle: number;
   peakWristVelocity: number;
   peakWrist: Point3D | null;
@@ -30,14 +52,22 @@ interface ArmState {
   cooldownUntil: number;
 }
 
-const EXTENSION_START = 90;
-const STRAIGHT_MIN = 160;
-const HOOK_RANGE: [number, number] = [70, 120];
-const UPPERCUT_RANGE: [number, number] = [80, 140];
+const EXTENSION_START = 75;
+const STRAIGHT_MIN = 140;
+const HOOK_RANGE: [number, number] = [60, 130];
+const UPPERCUT_RANGE: [number, number] = [70, 145];
+const RETRACT_DELTA = 15;
+// Minimum angle increase from entry to peak — rejects idle jitter.
+const MIN_EXTENSION_DELTA = 35;
+// Minimum wrist travel as a fraction of shoulder width — rejects tiny movements.
+const MIN_TRAVEL_RATIO = 0.6;
+// Real motion gate to enter the extending phase.
+const MIN_ENTRY_VELOCITY = 0.8;
 
 function newArmState(): ArmState {
   return {
     phase: 'idle',
+    entryElbowAngle: 0,
     peakElbowAngle: 0,
     peakWristVelocity: 0,
     peakWrist: null,
@@ -118,21 +148,22 @@ export class PunchClassifier {
     if (timestamp < state.cooldownUntil) return null;
 
     const angle = elbowAngle(side, landmarks);
-    const currentWrist = wrist(side, landmarks);
+    const currentWrist = relativeWrist(side, landmarks);
     const currentShoulder = landmarks[side === 'left' ? LM.LEFT_SHOULDER : LM.RIGHT_SHOULDER];
 
     const velocity = previous
-      ? calculateVelocity(
+      ? relativeVelocity(
           currentWrist,
-          wrist(side, previous.landmarks),
+          relativeWrist(side, previous.landmarks),
           timestamp - previous.timestamp
         )
       : 0;
 
     switch (state.phase) {
       case 'idle': {
-        if (angle >= EXTENSION_START && velocity >= 0.5) {
+        if (angle >= EXTENSION_START && velocity >= MIN_ENTRY_VELOCITY) {
           state.phase = 'extending';
+          state.entryElbowAngle = angle;
           state.peakElbowAngle = angle;
           state.peakWristVelocity = velocity;
           state.peakWrist = currentWrist;
@@ -151,8 +182,9 @@ export class PunchClassifier {
           state.peakWristVelocity = velocity;
         }
 
-        // Peak reached when elbow angle starts decreasing AND velocity drops.
-        const retracting = angle < state.peakElbowAngle - 5 || velocity < 0.3;
+        // Peak = angle has fallen meaningfully from the max we saw.
+        // Don't use velocity alone — frame-to-frame velocity dips are noisy.
+        const retracting = angle < state.peakElbowAngle - RETRACT_DELTA;
         if (retracting) {
           const event = this.classifyPeak(side, state, timestamp, landmarks);
           state.phase = 'retracting';
@@ -164,7 +196,7 @@ export class PunchClassifier {
 
       case 'retracting': {
         // Return to idle once the arm has clearly chambered back (small angle).
-        if (angle < EXTENSION_START - 10) {
+        if (angle < EXTENSION_START - 15) {
           Object.assign(state, newArmState());
         }
         return null;
@@ -180,11 +212,23 @@ export class PunchClassifier {
   ): PunchEvent | null {
     if (!state.peakWrist || !state.startWrist || !state.startShoulder) return null;
 
+    // Reject if the arm didn't actually extend meaningfully.
+    const extensionDelta = state.peakElbowAngle - state.entryElbowAngle;
+    if (extensionDelta < MIN_EXTENSION_DELTA) return null;
+
+    // Reject if the wrist didn't travel a real distance.
+    const sw = shoulderWidth(landmarks) || 0.2;
+    const travel = Math.hypot(
+      state.peakWrist.x - state.startWrist.x,
+      state.peakWrist.y - state.startWrist.y
+    );
+    if (travel / sw < MIN_TRAVEL_RATIO) return null;
+
     const type = this.determinePunchType(side, state, landmarks);
     if (type === null) return null;
 
     const threshold = PUNCH_THRESHOLDS[type];
-    const velocityOk = state.peakWristVelocity >= threshold.minWristVelocity * 0.8;
+    const velocityOk = state.peakWristVelocity >= threshold.minWristVelocity * 0.5;
     if (!velocityOk) return null;
 
     const confidence = this.scoreConfidence(type, state);

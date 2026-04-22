@@ -20,9 +20,15 @@ interface UsePoseDetectionProps {
   videoRef: React.RefObject<HTMLVideoElement>;
   canvasRef: React.RefObject<HTMLCanvasElement>;
   enabled: boolean;
+  skeletonColor?: string;
 }
 
-export function usePoseDetection({ videoRef, canvasRef, enabled }: UsePoseDetectionProps) {
+export function usePoseDetection({
+  videoRef,
+  canvasRef,
+  enabled,
+  skeletonColor = '#4ADE80',
+}: UsePoseDetectionProps) {
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fps, setFps] = useState(0);
@@ -32,6 +38,13 @@ export function usePoseDetection({ videoRef, canvasRef, enabled }: UsePoseDetect
   const animationFrameRef = useRef<number | null>(null);
   const lastFrameTimeRef = useRef<number>(0);
   const fpsCounterRef = useRef({ frames: 0, lastTime: performance.now() });
+  const colorRef = useRef(skeletonColor);
+
+  // Keep the render loop reading the latest color without invalidating the
+  // memoized detect callback (which would restart the RAF loop).
+  useEffect(() => {
+    colorRef.current = skeletonColor;
+  }, [skeletonColor]);
 
   // Initialize MediaPipe Pose Landmarker
   useEffect(() => {
@@ -101,19 +114,19 @@ export function usePoseDetection({ videoRef, canvasRef, enabled }: UsePoseDetect
 
       if (landmarks && landmarks.length > 0) {
         const drawingUtils = new DrawingUtils(ctx);
+        const color = colorRef.current;
 
-        // Draw landmarks with custom styling
         drawingUtils.drawLandmarks(landmarks, {
           radius: 4,
-          color: '#4ADE80',
-          fillColor: 'rgba(74, 222, 128, 0.8)',
+          color,
+          fillColor: color,
         });
 
         drawingUtils.drawConnectors(
           landmarks,
           PoseLandmarker.POSE_CONNECTIONS,
           {
-            color: '#4ADE80',
+            color,
             lineWidth: 2,
           }
         );
