@@ -8,7 +8,7 @@ export interface User {
   id: string;
   email: string;
   display_name: string | null;
-  stance: Stance;
+  stance: Stance | null;
   created_at: string;
 }
 

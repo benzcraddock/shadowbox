@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS public.users (
   id UUID REFERENCES auth.users(id) PRIMARY KEY,
   email TEXT NOT NULL,
   display_name TEXT,
-  stance TEXT CHECK (stance IN ('orthodox', 'southpaw')) DEFAULT 'orthodox',
+  stance TEXT CHECK (stance IN ('orthodox', 'southpaw')),
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 

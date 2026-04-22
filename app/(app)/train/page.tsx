@@ -5,12 +5,16 @@ import { useCamera } from '@/lib/hooks/useCamera';
 import { usePoseDetection } from '@/lib/hooks/usePoseDetection';
 import { createClient } from '@/lib/supabase/client';
 import { useRouter } from 'next/navigation';
+import StanceSelector from '@/components/StanceSelector';
+import type { Stance } from '@/lib/types/database';
 
 export default function TrainPage() {
   const router = useRouter();
   const supabase = createClient();
   const [user, setUser] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [stance, setStance] = useState<Stance | null>(null);
+  const [stanceLoaded, setStanceLoaded] = useState(false);
   const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null);
   const [elapsedTime, setElapsedTime] = useState(0);
   const [punchCount, setPunchCount] = useState(0);
@@ -33,21 +37,51 @@ export default function TrainPage() {
 
       if (!user) {
         router.push('/login');
-      } else {
-        setUser(user);
-        setLoading(false);
+        return;
       }
+
+      setUser(user);
+      setLoading(false);
     };
 
     checkUser();
   }, [router, supabase]);
 
-  // Start session timer
+  // Load stance from profile in parallel — does not block the camera mount
   useEffect(() => {
-    if (!sessionStartTime && ready && stream) {
+    if (!user) return;
+    let cancelled = false;
+    (async () => {
+      const { data: profile } = await supabase
+        .from('users')
+        .select('stance')
+        .eq('id', user.id)
+        .single();
+      if (cancelled) return;
+      setStance((profile?.stance as Stance | null) ?? null);
+      setStanceLoaded(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user, supabase]);
+
+  const saveStance = async (next: Stance) => {
+    if (!user) return;
+    const { error } = await supabase
+      .from('users')
+      .update({ stance: next })
+      .eq('id', user.id);
+    if (error) throw error;
+    setStance(next);
+  };
+
+  // Start session timer once stance is chosen and pose detection is live
+  useEffect(() => {
+    if (!sessionStartTime && ready && stream && stance) {
       setSessionStartTime(new Date());
     }
-  }, [ready, stream, sessionStartTime]);
+  }, [ready, stream, sessionStartTime, stance]);
 
   // Update elapsed time
   useEffect(() => {
@@ -100,6 +134,7 @@ export default function TrainPage() {
 
   return (
     <div className="flex flex-col h-screen bg-bg-primary">
+      {stanceLoaded && !stance && <StanceSelector onSelect={saveStance} />}
       {/* Top Bar */}
       <div className="flex items-center justify-between px-6 py-4 bg-bg-surface border-b border-border-subtle">
         <div className="flex items-center gap-8">
