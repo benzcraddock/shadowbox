@@ -147,6 +147,35 @@ Beyond the core MVP (Phases 1-4), here are the planned enhancements to make Shad
 
 ---
 
+## Phase 9: Game Mode 🎮
+
+**Concept**: Replace the camera feed's background with an interactive game environment. Use the same pose-detection pipeline that scores form in training mode to drive gameplay — punches and defensive movements become controls.
+
+**Core loop**:
+- **Hit targets for points**: Objects fly in or pop up in-world; landing the correct punch on the right target scores.
+- **React to incoming attacks**: A fireball/punch flies toward the camera → you duck. A swing arcs in from the left → you slip right. Correct defense = dodge; mistime = take damage.
+- **Combo multipliers**: Chaining detected punches and defenses without breaks increases score.
+- **Difficulty scaling**: Target speed, density, and combo complexity ramp with player skill.
+
+**Hooks into existing work**:
+- Reuses `PunchClassifier` and `DefenseClassifier` directly — a hit in-game is just a detection event mapped to the target at that moment.
+- Form score (from `FormAnalyzer`) becomes a damage/score multiplier — sloppy jabs score less.
+- Stance affects which hand the game expects for 1/2/3/4/5/6 target numbering.
+
+**Tech notes**:
+- Background replacement via MediaPipe Selfie Segmentation (mask the user out, composite game scene behind).
+- Three.js or a 2D canvas for the game scene; same `<canvas>` layer or a second overlay.
+- Target spawner + timing engine is new; detection engine is reused.
+
+**Why defer**: depends on detection accuracy being dialed in (Phase 2), combo tracking (Phase 3), and ideally voice coaching for in-game callouts. Makes the most sense after the core training loop is solid and the avatar/voice layer (Phase 5) gives us the presentation tools.
+
+**Open questions**:
+- Singleplayer arcade vs. structured levels?
+- Co-op / versus mode against a remote player?
+- Licensed IP skins (e.g. partnered boxing brands) as monetization?
+
+---
+
 ## Implementation Priority
 
 **Phase 5A: Voice Coaching** (Easier, high impact)
